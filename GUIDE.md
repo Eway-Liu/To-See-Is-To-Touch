@@ -15,6 +15,8 @@
 
 本项目使用深度学习方法从触觉传感器的差分图像预测3D形状（高度图）。
 
+本文所有命令均在仓库根目录执行，使用 `python -m shape_reconstruction.<子包>.<模块>` 启动。目录职责与完整命令见 [模块说明](shape_reconstruction/README.md)。
+
 ### 方案选择
 
 **采用方案：传统方法伪标签训练**
@@ -81,12 +83,11 @@ python -c "import torch; import cv2; import numpy; print('✓ 所有依赖安装
 
 ```bash
 # 测试采集脚本
-cd shape_reconstruction
-python data_preparation.py --auto_ref --output_dir ./test_data
+python -m shape_reconstruction.data.data_preparation --auto_ref --output_dir ./test_data
 
 # 采集50-100个样本测试，按'q'退出
 # 检查数据质量
-python check_dataset.py --data_dir ./test_data --visualize
+python -m shape_reconstruction.data.check_dataset --data_dir ./test_data --visualize
 
 # 确认正常后删除
 rm -rf ./test_data
@@ -104,7 +105,7 @@ rm -rf ./test_data
 
 ```bash
 # 开始采集
-python data_preparation.py --auto_ref --output_dir ./reconstruction_data/train
+python -m shape_reconstruction.data.data_preparation --auto_ref --output_dir ./reconstruction_data/train
 ```
 
 **采集策略：**
@@ -129,7 +130,7 @@ python data_preparation.py --auto_ref --output_dir ./reconstruction_data/train
 ls reconstruction_data/train/diff_images/ | wc -l
 
 # 检查数据质量
-python check_dataset.py --data_dir reconstruction_data/train --visualize
+python -m shape_reconstruction.data.check_dataset --data_dir reconstruction_data/train --visualize
 ```
 
 ### Day 2：模型训练
@@ -170,7 +171,7 @@ print('✓ 数据划分完成')
 
 ```bash
 # 训练模型
-python train_reconstruction.py \
+python -m shape_reconstruction.learning.train_reconstruction \
     --train_dir ./reconstruction_data/train \
     --val_dir ./reconstruction_data/val \
     --epochs 100 \
@@ -190,7 +191,7 @@ python train_reconstruction.py \
 **如果损失不下降：**
 ```bash
 # 降低学习率
-python train_reconstruction.py \
+python -m shape_reconstruction.learning.train_reconstruction \
     --train_dir ./reconstruction_data/train \
     --val_dir ./reconstruction_data/val \
     --epochs 100 \
@@ -207,15 +208,13 @@ python train_reconstruction.py \
 #### 创建测试脚本
 
 ```bash
-cat > test_model.py << 'EOF'
+cat > demo_reconstruction.py << 'EOF'
 import cv2
-import yaml
 import torch
 import numpy as np
-import sys
-sys.path.append('..')
 from shape_reconstruction import Sensor
-from train_reconstruction import UNet
+from shape_reconstruction.learning.train_reconstruction import UNet
+from shape_reconstruction.config import load_config
 
 # 加载模型
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -225,8 +224,7 @@ model.eval()
 print('✓ 模型加载完成')
 
 # 初始化传感器
-with open('shape_config.yaml', 'r') as f:
-    cfg = yaml.load(f, Loader=yaml.FullLoader)
+cfg = load_config()
 
 import time
 temp_camera = Sensor.__bases__[0](cfg, calibrated=True)
@@ -280,7 +278,7 @@ cv2.destroyAllWindows()
 EOF
 
 # 运行测试
-python test_model.py
+python demo_reconstruction.py
 ```
 
 ---
@@ -325,8 +323,7 @@ python test_model.py
 #### 启动采集
 
 ```bash
-cd shape_reconstruction
-python data_preparation.py --auto_ref --output_dir ./reconstruction_data/train
+python -m shape_reconstruction.data.data_preparation --auto_ref --output_dir ./reconstruction_data/train
 ```
 
 #### 操作说明
@@ -354,7 +351,7 @@ python data_preparation.py --auto_ref --output_dir ./reconstruction_data/train
 ls reconstruction_data/train/diff_images/ | wc -l
 
 # 检查质量
-python check_dataset.py --data_dir reconstruction_data/train --visualize
+python -m shape_reconstruction.data.check_dataset --data_dir reconstruction_data/train --visualize
 ```
 
 **检查项目：**
@@ -397,7 +394,7 @@ python check_dataset.py --data_dir reconstruction_data/train --visualize
 ### 训练参数
 
 ```bash
-python train_reconstruction.py \
+python -m shape_reconstruction.learning.train_reconstruction \
     --train_dir ./reconstruction_data/train \
     --val_dir ./reconstruction_data/val \
     --epochs 100 \              # 训练轮数
@@ -486,7 +483,7 @@ pip install opencv-python==4.8.0.76
 --batch_size 16  # 或 8, 4
 
 # 或使用CPU训练（虽然慢）
-CUDA_VISIBLE_DEVICES="" python train_reconstruction.py ...
+CUDA_VISIBLE_DEVICES="" python -m shape_reconstruction.learning.train_reconstruction ...
 ```
 
 #### Q: 训练太慢？
@@ -536,50 +533,67 @@ pip install torch torchvision opencv-python numpy matplotlib pyyaml tqdm scipy
 python -c "import torch; import cv2; print('✓ 安装成功')"
 
 # 3. 开始采集数据
-cd shape_reconstruction
-python data_preparation.py --auto_ref
+python -m shape_reconstruction.data.data_preparation --auto_ref
 
 # 4. 检查数据（采集一段时间后）
-python check_dataset.py --data_dir reconstruction_data/train --visualize
+python -m shape_reconstruction.data.check_dataset --data_dir reconstruction_data/train --visualize
 
 # 5. 划分数据集（采集完成后）
 python -c "..." # 见上文
 
 # 6. 训练模型
-python train_reconstruction.py \
+python -m shape_reconstruction.learning.train_reconstruction \
     --train_dir ./reconstruction_data/train \
     --val_dir ./reconstruction_data/val \
     --epochs 100
 
-# 7. 测试模型
-python test_model.py
+# 7. 运行 Day 3 中生成的演示脚本（读取 models/best_model.pth）
+python demo_reconstruction.py
 ```
 
 ---
 
 ## 项目结构
 
-```
+```text
 .
 ├── shape_reconstruction/
-│   ├── data_preparation.py      # 数据采集
-│   ├── train_reconstruction.py  # 模型训练
-│   ├── check_dataset.py         # 数据检查
-│   ├── sensor.py                # 传感器类
-│   └── camera.py                # 相机类
-├── reconstruction_data/         # 数据目录（不提交git）
+│   ├── calibration/              # 标定脚本和按传感器编号分组的标定数据
+│   │   ├── camera_calibration.py
+│   │   ├── sensor_calibration.py
+│   │   └── sensor_146/
+│   │       ├── camera_calibration/
+│   │       └── depth_calibration/
+│   ├── configs/
+│   │   └── shape_config.yaml      # 传感器参数
+│   ├── config.py                  # 配置加载与标定路径解析
+│   ├── core/                      # 相机与传统传感器重建
+│   ├── data/                      # 数据采集、质量检查
+│   ├── learning/                  # 数据集、模型、训练、评估、深度学习传感器
+│   ├── visualization/             # 点云显示和 sensor_obj/ 网格资源
+│   ├── demos/                     # 实时三维演示
+│   └── README.md                  # 模块说明与启动命令
+├── tests/                         # 配置路径回归检查
+├── reconstruction_data/           # 运行时采集数据
 │   ├── train/
 │   │   ├── diff_images/
 │   │   └── height_maps/
 │   └── val/
 │       ├── diff_images/
 │       └── height_maps/
-├── models/                      # 模型目录（不提交git）
-│   ├── best_model.pth
-│   └── training_curve.png
-├── requirements.txt             # Python依赖
-├── environment.yml              # Conda环境
-└── GUIDE.md                     # 本文档
+├── models/                        # 快速训练脚本的输出
+├── saved_models/                  # 多模型训练脚本的输出
+├── requirements.txt
+└── GUIDE.md
+```
+
+默认配置固定定位到 `shape_reconstruction/configs/shape_config.yaml`；配置中的相对标定路径以 YAML 所在目录为基准。命令行中的数据、模型和结果路径仍相对于当前工作目录。已有数据无需移动，使用 `--output_dir`、`--data_dir`、`--train_dir`、`--val_dir` 指定原路径即可。
+
+标定入口：
+
+```bash
+python -m shape_reconstruction.calibration.camera_calibration
+python -m shape_reconstruction.calibration.sensor_calibration
 ```
 
 ---

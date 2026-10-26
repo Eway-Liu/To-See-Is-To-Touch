@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
-from shape_reconstruction import Camera
-import yaml
+from .camera import Camera
+from ..config import load_config
 
 
 class Sensor(Camera):
@@ -143,8 +143,7 @@ class Sensor(Camera):
 
 
 if __name__ == '__main__':
-    f = open("shape_config.yaml", 'r+', encoding='utf-8')
-    cfg = yaml.load(f, Loader=yaml.FullLoader)
+    cfg = load_config()
     sensor = Sensor(cfg)
     while sensor.cap.isOpened():
         img = sensor.get_rectify_crop_image()

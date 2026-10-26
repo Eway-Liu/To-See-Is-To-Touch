@@ -3,7 +3,6 @@
 从差分图像预测高度图
 """
 import os
-import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim

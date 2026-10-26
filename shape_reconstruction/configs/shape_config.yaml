@@ -1,5 +1,5 @@
 sensor_id: 146
-calibration_root_dir: ../shape_reconstruction/calibration
+calibration_root_dir: ../calibration
 
 camera_setting:
   camera_channel: 0

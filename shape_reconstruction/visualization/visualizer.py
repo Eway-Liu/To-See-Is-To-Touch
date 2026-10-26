@@ -1,6 +1,6 @@
 import numpy as np
 import open3d
-from open3d import *
+from pathlib import Path
 
 
 class Visualizer:
@@ -8,13 +8,15 @@ class Visualizer:
         self.vis = open3d.visualization.Visualizer()
         self.vis.create_window(window_name='9DTact-Shape_Reconstruction', width=2000, height=1600)
 
+        mesh_dir = Path(__file__).resolve().parent / 'sensor_obj'
+
         # load, color, relocate and add sensor objs
         black_base = open3d.io.read_triangle_mesh(
-            "sensor_obj/black_base.obj")
+            str(mesh_dir / 'black_base.obj'))
         white_shell = open3d.io.read_triangle_mesh(
-            "sensor_obj/white_shell.obj")
+            str(mesh_dir / 'white_shell.obj'))
         black_contact = open3d.io.read_triangle_mesh(
-            "sensor_obj/black_contact.obj")
+            str(mesh_dir / 'black_contact.obj'))
         black_base.compute_vertex_normals()
         white_shell.compute_vertex_normals()
         black_contact.compute_vertex_normals()

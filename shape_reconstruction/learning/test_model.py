@@ -3,20 +3,18 @@
 测试训练好的深度学习模型并与传统方法对比
 """
 import os
-import sys
 import time
 import argparse
 import cv2
-import yaml
+from ..config import DEFAULT_CONFIG_PATH, load_config
 import torch
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from sensor import Sensor
-from model import ReconstructionNet, SimpleReconstructionNet, ResNetReconstructionNet
-from dataset import ShapeReconstructionDataset
+from ..core.sensor import Sensor
+from .model import ReconstructionNet, SimpleReconstructionNet, ResNetReconstructionNet
+from .dataset import ShapeReconstructionDataset
 
 
 class ReconstructionModel:
@@ -283,9 +281,9 @@ def realtime_demo(sensor, dl_model):
 def main():
     parser = argparse.ArgumentParser(description='测试形状重建模型')
     parser.add_argument('--model_path', type=str,
-                        default='../saved_models/reconstruction_best.pth',
+                        default='./saved_models/reconstruction_best.pth',
                         help='模型路径')
-    parser.add_argument('--config', type=str, default='shape_config.yaml',
+    parser.add_argument('--config', type=str, default=str(DEFAULT_CONFIG_PATH),
                         help='传感器配置文件')
     parser.add_argument('--mode', type=str, default='demo',
                         choices=['demo', 'evaluate', 'compare'],
@@ -307,7 +305,7 @@ def main():
     if not os.path.exists(args.model_path):
         print(f"\n错误：模型文件不存在: {args.model_path}")
         print("请先训练模型：")
-        print("  python shape_reconstruction/train_reconstruction.py")
+        print("  python -m shape_reconstruction.learning.train_model")
         return
 
     # 加载模型
@@ -332,8 +330,7 @@ def main():
     elif args.mode == 'compare':
         # 对比测试
         print("\n加载传感器...")
-        with open(args.config, 'r', encoding='utf-8') as f:
-            cfg = yaml.load(f, Loader=yaml.FullLoader)
+        cfg = load_config(args.config)
         sensor = Sensor(cfg, calibrated=True)
 
         compare_methods(sensor, dl_model, args.num_samples, args.save_dir)
@@ -341,8 +338,7 @@ def main():
     elif args.mode == 'demo':
         # 实时演示
         print("\n加载传感器...")
-        with open(args.config, 'r', encoding='utf-8') as f:
-            cfg = yaml.load(f, Loader=yaml.FullLoader)
+        cfg = load_config(args.config)
         sensor = Sensor(cfg, calibrated=True)
 
         realtime_demo(sensor, dl_model)

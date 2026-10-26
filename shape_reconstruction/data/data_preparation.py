@@ -3,17 +3,14 @@
 使用传统方法生成的高度图作为伪标签
 """
 import os
-import sys
 import cv2
-import yaml
+from ..config import DEFAULT_CONFIG_PATH, load_config
 import numpy as np
 import time
 import argparse
 from glob import glob
 
-# 添加路径
-sys.path.append(os.path.dirname(os.path.abspath(__file__)) + '/../')
-from shape_reconstruction import Sensor
+from ..core.sensor import Sensor
 
 
 def get_existing_count(save_dir):
@@ -129,7 +126,7 @@ def collect_data_from_camera(sensor, save_dir='./reconstruction_data/train'):
 
 def main():
     parser = argparse.ArgumentParser(description='从摄像头采集形状重建训练数据')
-    parser.add_argument('--config', type=str, default='shape_config.yaml',
+    parser.add_argument('--config', type=str, default=str(DEFAULT_CONFIG_PATH),
                         help='传感器配置文件')
     parser.add_argument('--output_dir', type=str, default='./reconstruction_data/train',
                         help='输出数据目录')
@@ -143,8 +140,7 @@ def main():
     print("=" * 60)
 
     print("\n加载传感器配置...")
-    with open(args.config, 'r', encoding='utf-8') as f:
-        cfg = yaml.load(f, Loader=yaml.FullLoader)
+    cfg = load_config(args.config)
 
     print("\n初始化传感器...")
 
@@ -196,7 +192,7 @@ def main():
     print("  - 可以多次运行此脚本继续采集数据")
     print("  - 建议至少采集 500-1000 个样本用于训练")
     print("  - 采集完成后运行训练脚本：")
-    print("    python shape_reconstruction/train_reconstruction.py")
+    print("    python -m shape_reconstruction.learning.train_reconstruction")
 
 
 if __name__ == '__main__':

@@ -1,10 +1,10 @@
 import cv2
-import yaml
-from shape_reconstruction import Sensor, Visualizer
+from ..config import load_config
+from ..core.sensor import Sensor
+from ..visualization.visualizer import Visualizer
 
 if __name__ == '__main__':
-    f = open("shape_config.yaml", 'r+', encoding='utf-8')
-    cfg = yaml.load(f, Loader=yaml.FullLoader)
+    cfg = load_config()
     sensor = Sensor(cfg)
     visualizer = Visualizer(sensor.points)
 

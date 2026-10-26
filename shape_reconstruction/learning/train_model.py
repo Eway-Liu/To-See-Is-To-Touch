@@ -3,7 +3,6 @@
 训练深度学习模型进行三维形状重建
 """
 import os
-import sys
 import time
 import argparse
 import yaml
@@ -15,10 +14,8 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 from tqdm import tqdm
 
-# 添加路径
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from dataset import ShapeReconstructionDataset
-from model import ReconstructionNet, SimpleReconstructionNet, ResNetReconstructionNet
+from .dataset import ShapeReconstructionDataset
+from .model import ReconstructionNet, SimpleReconstructionNet, ResNetReconstructionNet
 
 
 class EdgeLoss(nn.Module):
@@ -166,7 +163,7 @@ def main():
                         help='训练轮数')
     parser.add_argument('--lr', type=float, default=1e-3,
                         help='学习率')
-    parser.add_argument('--save_dir', type=str, default='../saved_models',
+    parser.add_argument('--save_dir', type=str, default='./saved_models',
                         help='模型保存目录')
     parser.add_argument('--log_dir', type=str, default='./logs',
                         help='日志目录')
@@ -213,7 +210,7 @@ def main():
     if len(train_dataset) == 0:
         print("\n错误：训练集为空！")
         print("请先运行数据准备脚本：")
-        print("  python shape_reconstruction/prepare_data.py --method synthetic")
+        print("  python -m shape_reconstruction.data.data_preparation --auto_ref")
         return
 
     # 创建数据加载器

@@ -2,11 +2,13 @@
 集成深度学习的传感器类
 继承原有Sensor类，添加深度学习推理功能
 """
+import os
 import numpy as np
 import cv2
 import torch
-from shape_reconstruction import Sensor
-from shape_reconstruction.model import ReconstructionNet, SimpleReconstructionNet, ResNetReconstructionNet
+from ..core.sensor import Sensor
+from ..config import load_config
+from .model import ReconstructionNet, SimpleReconstructionNet, ResNetReconstructionNet
 
 
 class SensorDL(Sensor):
@@ -136,14 +138,11 @@ class SensorDL(Sensor):
 
 
 if __name__ == '__main__':
-    import yaml
-
     # 测试集成
     print("测试SensorDL...")
 
     # 加载配置
-    with open("shape_config.yaml", 'r', encoding='utf-8') as f:
-        cfg = yaml.load(f, Loader=yaml.FullLoader)
+    cfg = load_config()
 
     # 创建传感器（先不加载模型）
     sensor = SensorDL(cfg, model_path=None, use_dl=False)
@@ -151,7 +150,7 @@ if __name__ == '__main__':
     print(f"\n当前方法: {sensor.get_current_method()}")
 
     # 尝试加载模型
-    model_path = '../saved_models/reconstruction_best.pth'
+    model_path = './saved_models/reconstruction_best.pth'
     if os.path.exists(model_path):
         sensor.load_dl_model(model_path)
         sensor.set_method(True)

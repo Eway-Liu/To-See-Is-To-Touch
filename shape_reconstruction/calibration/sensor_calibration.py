@@ -1,15 +1,14 @@
 # collect images and calibrate the sensor
 import numpy as np
 import cv2
-import yaml
+from ..config import DEFAULT_CONFIG_PATH, load_config
 import os
-from shape_reconstruction import Sensor
+from ..core.sensor import Sensor
 
 
 class SensorCalibration:
-    def __init__(self, cfg_path):
-        f = open(cfg_path, 'r+', encoding='utf-8')
-        cfg = yaml.load(f, Loader=yaml.FullLoader)
+    def __init__(self, cfg_path=DEFAULT_CONFIG_PATH):
+        cfg = load_config(cfg_path)
         self.sensor = Sensor(cfg, calibrated=False)
         if not os.path.exists(self.sensor.depth_calibration_dir):
             os.makedirs(self.sensor.depth_calibration_dir)
@@ -135,6 +134,6 @@ class SensorCalibration:
 
 
 if __name__ == '__main__':
-    config_path = 'shape_config.yaml'
+    config_path = DEFAULT_CONFIG_PATH
     depth_calibration = SensorCalibration(config_path)
     depth_calibration.run()

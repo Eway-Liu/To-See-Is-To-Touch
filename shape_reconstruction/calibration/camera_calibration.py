@@ -1,16 +1,15 @@
 # collect images and calibrate the camera
 import numpy as np
 import cv2
-import yaml
+from ..config import DEFAULT_CONFIG_PATH, load_config
 import os
-from shape_reconstruction import Camera
+from ..core.camera import Camera
 from scipy.interpolate import Rbf
 
 
 class CameraCalibration:
-    def __init__(self, cfg_path):
-        f = open(cfg_path, 'r+', encoding='utf-8')
-        cfg = yaml.load(f, Loader=yaml.FullLoader)
+    def __init__(self, cfg_path=DEFAULT_CONFIG_PATH):
+        cfg = load_config(cfg_path)
         self.camera = Camera(cfg, calibrated=False)
 
         camera_calibration = cfg['camera_calibration']
@@ -175,6 +174,6 @@ class CameraCalibration:
 
 
 if __name__ == '__main__':
-    config_path = 'shape_config.yaml'
+    config_path = DEFAULT_CONFIG_PATH
     cc = CameraCalibration(config_path)
     cc.run()

@@ -1,6 +1,6 @@
 import numpy as np
 import cv2
-import yaml
+from ..config import load_config
 
 
 class Camera:
@@ -135,8 +135,7 @@ class Camera:
 
 
 if __name__ == '__main__':
-    f = open("shape_config.yaml", 'r+', encoding='utf-8')
-    cfg = yaml.load(f, Loader=yaml.FullLoader)
+    cfg = load_config()
     camera = Camera(cfg)
     while True:
         raw_img = camera.get_raw_image()
