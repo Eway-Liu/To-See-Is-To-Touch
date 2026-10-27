@@ -27,17 +27,10 @@ def traditional_from_saved(root, name, config=None):
     from ..core.sensor import Sensor
     from ..config import load_config
     cfg = load_config(config) if config else load_config()
-    sensor = Sensor.__new__(Sensor)
-    sensor.ref_GRAY = np.load(Path(root)/'reference_images'/name, allow_pickle=False)
+    reference = np.load(Path(root)/'reference_images'/name, allow_pickle=False)
     raw = np.load(Path(root)/'raw_images'/name, allow_pickle=False)
-    directory = Path(cfg['calibration_root_dir']) / f"sensor_{cfg['sensor_id']}"
-    dc = cfg['depth_calibration']
-    sensor.Pixel_to_Depth = np.load(str(directory)+dc['depth_calibration_dir']+dc['Pixel_to_Depth_path'], allow_pickle=False)
-    sensor.max_index = len(sensor.Pixel_to_Depth)-1
-    rc = cfg['sensor_reconstruction']
-    sensor.lighting_threshold, sensor.kernel_list = rc['lighting_threshold'], rc['kernel_list']
-    sensor.depth_k = rc['depth_k']
-    if raw.shape != sensor.ref_GRAY.shape or raw.dtype != np.uint8 or sensor.ref_GRAY.dtype != np.uint8:
+    sensor = Sensor.from_reference(cfg, reference)
+    if raw.shape != reference.shape or raw.dtype != np.uint8:
         raise ValueError('Saved raw/reference frames must be matching uint8 grayscale arrays')
     return Sensor.raw_image_2_height_map(sensor, raw)
 

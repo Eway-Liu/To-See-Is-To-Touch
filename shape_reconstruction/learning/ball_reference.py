@@ -42,7 +42,7 @@ def main():
                                     args.ball_radius_mm, args.mm_per_pixel)
     out = Path(args.output_dir)
     diff = ref.astype(np.float32)-raw.astype(np.float32)
-    from ..data.data_preparation import save_sample
+    from ..data.pairs import save_sample
     save_sample(out,args.sample,diff,label,raw,ref,
                 {'group':args.sample,'object_id':f'ball_R{args.ball_radius_mm:g}mm',
                  'label_source':'spherical_geometry_reference','center_xy_px':args.center,

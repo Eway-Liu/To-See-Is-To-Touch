@@ -5,6 +5,24 @@ from ..config import load_config
 
 
 class Sensor(Camera):
+    @classmethod
+    def from_reference(cls, cfg, reference):
+        """Load only depth reconstruction state, without opening a camera."""
+        if reference.ndim != 2 or reference.dtype != np.uint8:
+            raise ValueError('Reference must be a uint8 grayscale image')
+        sensor = cls.__new__(cls)
+        directory = cfg['calibration_root_dir'] + '/sensor_' + str(cfg['sensor_id'])
+        dc = cfg['depth_calibration']
+        sensor.Pixel_to_Depth = np.load(
+            directory + dc['depth_calibration_dir'] + dc['Pixel_to_Depth_path'],
+            allow_pickle=False)
+        sensor.max_index = len(sensor.Pixel_to_Depth) - 1
+        rc = cfg['sensor_reconstruction']
+        sensor.ref_GRAY = reference
+        sensor.lighting_threshold = rc['lighting_threshold']
+        sensor.kernel_list = rc['kernel_list']
+        return sensor
+
     def __init__(self, cfg, calibrated=True, ref=None, auto_ref=False):
         # This flag controls depth calibration; Sensor always needs camera rectification.
         super().__init__(cfg)

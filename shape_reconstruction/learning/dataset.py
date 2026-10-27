@@ -63,12 +63,3 @@ class TactileDataset(ShapeReconstructionDataset):
     def __init__(self, data_dir, augment=False, **kwargs):
         super().__init__(mode='train' if augment else 'val', data_dir=data_dir,
                          augmentation=augment, **kwargs)
-
-
-class ShapeReconstructionDatasetFromSensor:
-    def __init__(self, sensor, num_samples=1000, save_dir='./reconstruction_data/train'):
-        self.sensor, self.num_samples, self.save_dir = sensor, num_samples, save_dir
-
-    def collect_data(self):
-        from ..data.data_preparation import collect_data_from_camera
-        return collect_data_from_camera(self.sensor, self.save_dir, max_samples=self.num_samples)

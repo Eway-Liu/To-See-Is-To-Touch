@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 import os
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 import numpy as np
@@ -10,8 +11,17 @@ from .pairs import load_pair
 
 
 def prepare(data_dir, output, seed=42, val_fraction=.15, test_fraction=.15,
-            height_scale=10.0, group_by='contact', legacy_block_size=None):
+            height_scale=10.0, group_by='contact', legacy_block_size=None, extend=False):
     root, output = Path(data_dir).resolve(), Path(output).resolve()
+    previous = None
+    if extend:
+        previous = json.loads(output.read_text(encoding='utf-8'))
+        if ((output.parent / previous['data_dir']).resolve() != root
+                or previous['seed'] != seed or previous['group_by'] != group_by
+                or previous['height_scale_mm'] != height_scale or previous.get('legacy_block_size') != legacy_block_size):
+            raise ValueError('Extending requires the original data root, seed, grouping and normalization')
+    elif output.exists():
+        raise FileExistsError(f'{output}: use --extend to add data while preserving original assignments')
     if not np.isfinite([val_fraction,test_fraction,height_scale]).all() or height_scale <= 0:
         raise ValueError('Fractions and height scale must be finite and scale positive')
     if val_fraction <= 0 or test_fraction <= 0 or val_fraction + test_fraction >= 1:
@@ -58,7 +68,7 @@ def prepare(data_dir, output, seed=42, val_fraction=.15, test_fraction=.15,
             group = item.get('group')
             if not group:
                 if not legacy_block_size or legacy_block_size < 2:
-                    raise ValueError('Missing contact metadata; recollect or explicitly use --legacy_block_size N. Legacy blocks cannot establish independent contacts.')
+                    raise ValueError('Missing contact metadata; annotate contact groups in samples.jsonl or explicitly use --legacy_block_size N. Legacy blocks cannot establish independent contacts.')
                 group = f'legacy_block_{index//legacy_block_size}'
         accepted.append({'file':name,'group':group,'object_id':item.get('object_id','unknown'),
                          'label_source':item.get('label_source','unknown'),'input_sha256':digest,
@@ -75,8 +85,34 @@ def prepare(data_dir, output, seed=42, val_fraction=.15, test_fraction=.15,
     n_test = min(max(1,round(n*test_fraction)),n-2)
     n_val = min(max(1,round(n*val_fraction)),n-n_test-1)
     splits = {'train':[],'val':[],'test':[]}
+    locked = {}
+    if previous is not None:
+        current = {row['file']:row for row in accepted}
+        old_rows = {row['file']:row for row in previous['samples']}
+        assigned = set()
+        for split in splits:
+            for name in previous['splits'][split]:
+                if name in assigned or name not in old_rows or name not in current:
+                    raise ValueError(f'Previously assigned sample missing, rejected or duplicated: {name}')
+                assigned.add(name)
+                if any(current[name].get(k) != v for k,v in old_rows[name].items()):
+                    raise ValueError(f'Previously assigned sample changed: {name}')
+                key = current[name]['group']
+                if key in locked and locked[key] != split:
+                    raise ValueError(f'Original group spans multiple splits: {key}')
+                locked[key] = split
+        if assigned != set(old_rows):
+            raise ValueError('Original manifest has samples without a split assignment')
+    counts = {split:sum(value == split for value in locked.values()) for split in splits}
+    targets = {'train':n-n_val-n_test,'val':n_val,'test':n_test}
     for i,key in enumerate(keys):
-        split='test' if i<n_test else ('val' if i<n_test+n_val else 'train')
+        if key in locked:
+            split = locked[key]
+        elif previous is not None:
+            split = max(targets,key=lambda s: targets[s]-counts[s])
+            counts[split] += 1
+        else:
+            split='test' if i<n_test else ('val' if i<n_test+n_val else 'train')
         splits[split].extend(row['file'] for row in groups[key])
     for values in splits.values(): values.sort()
     output.parent.mkdir(parents=True,exist_ok=True)
@@ -86,9 +122,21 @@ def prepare(data_dir, output, seed=42, val_fraction=.15, test_fraction=.15,
               'label_source':sorted({r['label_source'] for r in accepted}),'splits':splits,'samples':accepted,
               'screening':{'accepted':len(accepted),'missing_height':missing,'orphan_height':orphan_heights,
                            'invalid':invalid,'rejected':rejected}}
-    # A fixed manifest is an experiment boundary; regenerate under a new name deliberately.
-    with output.open('x',encoding='utf-8') as stream:
-        json.dump(document,stream,indent=2,ensure_ascii=False)
+    # Extension is explicit and atomic; old samples keep their split and checked metadata.
+    if extend:
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w',dir=output.parent,prefix=output.name+'.',suffix='.tmp',
+                                             encoding='utf-8',delete=False) as stream:
+                temporary = Path(stream.name)
+                json.dump(document,stream,indent=2,ensure_ascii=False)
+                stream.flush();os.fsync(stream.fileno())
+            temporary.replace(output)
+        finally:
+            if temporary is not None: temporary.unlink(missing_ok=True)
+    else:
+        with output.open('x',encoding='utf-8') as stream:
+            json.dump(document,stream,indent=2,ensure_ascii=False)
     print(f'Kept {len(accepted)}/{len(files)} samples; {n} groups; train/val/test = '+ '/'.join(str(len(splits[k])) for k in splits))
     print(f'Label source: {document["label_source"]}; manifest: {output}')
     if legacy_block_size: print('WARNING: temporal blocks are weaker than annotated contact/object separation.')
@@ -105,8 +153,9 @@ def main():
     p.add_argument('--height_scale',type=float,default=10.)
     p.add_argument('--group_by',choices=['contact','object'],default='contact')
     p.add_argument('--legacy_block_size',type=int)
+    p.add_argument('--extend',action='store_true',help='Atomically extend an existing manifest, preserving original sample/group assignments')
     a=p.parse_args()
-    prepare(a.data_dir,a.output,a.seed,a.val_fraction,a.test_fraction,a.height_scale,a.group_by,a.legacy_block_size)
+    prepare(a.data_dir,a.output,a.seed,a.val_fraction,a.test_fraction,a.height_scale,a.group_by,a.legacy_block_size,a.extend)
 
 
 if __name__=='__main__': main()

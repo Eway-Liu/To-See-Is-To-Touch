@@ -1,6 +1,7 @@
-"""Shared validation for acquisition, screening, and training. Units: mm."""
+"""Shared validation for pseudo-label generation, screening, and training. Units: mm."""
 from pathlib import Path
 import json
+import os
 import numpy as np
 
 
@@ -33,3 +34,28 @@ def load_pair(root, name, height_scale=10.0):
     height = np.load(root / 'height_maps' / name, allow_pickle=False).astype(np.float32)
     validate_pair(diff, height, height_scale)
     return diff, np.maximum(height, 0)
+
+
+def save_sample(root,index,diff,height,raw,reference,metadata):
+    validate_pair(diff,height)
+    stem=f'{index:06d}' if isinstance(index,int) else str(index)
+    if Path(stem).name!=stem or stem in ('','.','..') or any(c in stem for c in '/\\:'):
+        raise ValueError('Sample must be a safe filename stem')
+    if raw.shape!=diff.shape or reference.shape!=diff.shape or raw.dtype!=np.uint8 or reference.dtype!=np.uint8:
+        raise ValueError('Raw/reference must be matching uint8 grayscale arrays')
+    name=f'{stem}.npy';written=[]
+    try:
+        for folder,array in (('diff_images',diff),('height_maps',height),
+                             ('raw_images',raw),('reference_images',reference)):
+            path=Path(root)/folder/name;path.parent.mkdir(parents=True,exist_ok=True)
+            with path.open('xb') as stream:
+                written.append(path)
+                np.save(stream,array,allow_pickle=False)
+        row={'file':name,**metadata}
+        with (Path(root)/'samples.jsonl').open('a',encoding='utf-8') as stream:
+            stream.write(json.dumps(row,ensure_ascii=False)+'\n')
+            stream.flush();os.fsync(stream.fileno())
+    except Exception:
+        for path in written:path.unlink(missing_ok=True)
+        raise
+    return name

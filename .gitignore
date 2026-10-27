@@ -61,3 +61,6 @@ venv.bak/
 htmlcov/
 .tox/
 .hypothesis/
+
+# Generated reconstruction datasets and previews
+/reconstruction_data/
