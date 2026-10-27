@@ -58,6 +58,8 @@ class ReconstructionNet(nn.Module):
 
     def forward(self, x):
         # Encoder
+        size = x.shape[-2:]
+        x = F.pad(x, (0, (-size[1]) % 8, 0, (-size[0]) % 8), mode='replicate')
         enc1 = self.enc1(x)
         enc2 = self.enc2(self.pool1(enc1))
         enc3 = self.enc3(self.pool2(enc2))
@@ -82,7 +84,7 @@ class ReconstructionNet(nn.Module):
         out = self.out(dec1)
         out = torch.relu(out)  # 确保输出非负
 
-        return out
+        return out[..., :size[0], :size[1]]
 
 
 class SimpleReconstructionNet(nn.Module):
@@ -126,9 +128,11 @@ class SimpleReconstructionNet(nn.Module):
         )
 
     def forward(self, x):
+        size = x.shape[-2:]
+        x = F.pad(x, (0, (-size[1]) % 4, 0, (-size[0]) % 4), mode='replicate')
         x = self.encoder(x)
         x = self.decoder(x)
-        return x
+        return x[..., :size[0], :size[1]]
 
 
 class ResidualBlock(nn.Module):
@@ -202,6 +206,8 @@ class ResNetReconstructionNet(nn.Module):
         )
 
     def forward(self, x):
+        size = x.shape[-2:]
+        x = F.pad(x, (0, (-size[1]) % 8, 0, (-size[0]) % 8), mode='replicate')
         x = self.conv_in(x)
         x = self.res_block1(x)
         x = self.res_block2(x)
@@ -212,12 +218,80 @@ class ResNetReconstructionNet(nn.Module):
         x = self.up2(x)
         x = self.up3(x)
         x = self.conv_out(x)
-        return x
+        return x[..., :size[0], :size[1]]
 
 
 def count_parameters(model):
     """统计模型参数量"""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+class ResidualConv(nn.Module):
+    """GroupNorm remains stable with small full-resolution training batches."""
+    def __init__(self, cin, cout):
+        super().__init__()
+        groups = min(8, cout)
+        while cout % groups:
+            groups -= 1
+        self.body = nn.Sequential(
+            nn.Conv2d(cin, cout, 3, padding=1, bias=False),
+            nn.GroupNorm(groups, cout), nn.SiLU(inplace=True),
+            nn.Conv2d(cout, cout, 3, padding=1, bias=False),
+            nn.GroupNorm(groups, cout))
+        self.skip = nn.Conv2d(cin, cout, 1, bias=False) if cin != cout else nn.Identity()
+        hidden = max(cout // 8, 4)
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1), nn.Conv2d(cout, hidden, 1), nn.SiLU(),
+            nn.Conv2d(hidden, cout, 1), nn.Sigmoid())
+
+    def forward(self, x):
+        y = self.body(x)
+        return F.silu(self.skip(x) + y * self.channel_attention(y))
+
+
+class AttentionResidualUNet(nn.Module):
+    """Four-scale residual U-Net for dense height regression, no input resizing."""
+    def __init__(self, base_features=48):
+        super().__init__()
+        widths = [base_features * 2 ** i for i in range(5)]
+        self.encoders = nn.ModuleList([ResidualConv(1, widths[0])] + [
+            ResidualConv(widths[i - 1], widths[i]) for i in range(1, 5)])
+        self.reductions = nn.ModuleList([nn.Conv2d(widths[i + 1], widths[i], 1)
+                                         for i in reversed(range(4))])
+        self.gates = nn.ModuleList([nn.Conv2d(widths[i] * 2, 1, 1)
+                                    for i in reversed(range(4))])
+        self.decoders = nn.ModuleList([ResidualConv(widths[i] * 2, widths[i])
+                                       for i in reversed(range(4))])
+        self.output = nn.Conv2d(widths[0], 1, 1)
+        nn.init.normal_(self.output.weight, std=0.001)
+        nn.init.zeros_(self.output.bias)
+
+    def forward(self, x):
+        size = x.shape[-2:]
+        x = F.pad(x, (0, (-size[1]) % 16, 0, (-size[0]) % 16), mode='replicate')
+        skips = []
+        for i, encoder in enumerate(self.encoders):
+            x = encoder(F.avg_pool2d(x, 2) if i else x)
+            skips.append(x)
+        for reduce, gate, decode, skip in zip(
+                self.reductions, self.gates, self.decoders, reversed(skips[:-1])):
+            x = reduce(F.interpolate(x, size=skip.shape[-2:], mode='bilinear', align_corners=False))
+            attention = torch.sigmoid(gate(torch.cat([x, skip], dim=1)))
+            x = decode(torch.cat([x, skip * attention], dim=1))
+        # Linear regression avoids permanently zero gradients from a final ReLU.
+        return self.output(x)[..., :size[0], :size[1]]
+
+
+def build_model(model_type='attention_unet', base_features=48):
+    if model_type == 'attention_unet':
+        return AttentionResidualUNet(base_features)
+    if model_type == 'unet':
+        return ReconstructionNet(base_features=base_features)
+    if model_type == 'simple':
+        return SimpleReconstructionNet()
+    if model_type == 'resnet':
+        return ResNetReconstructionNet()
+    raise ValueError(f'Unknown model: {model_type}')
 
 
 if __name__ == '__main__':

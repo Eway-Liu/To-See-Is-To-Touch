@@ -5,7 +5,8 @@ from ..config import load_config
 
 
 class Sensor(Camera):
-    def __init__(self, cfg, calibrated=True, ref=None):
+    def __init__(self, cfg, calibrated=True, ref=None, auto_ref=False):
+        # This flag controls depth calibration; Sensor always needs camera rectification.
         super().__init__(cfg)
         depth_calibration = cfg['depth_calibration']
         self.depth_calibration_dir = self.calibration_sensor_dir + \
@@ -19,7 +20,13 @@ class Sensor(Camera):
 
             # parameters for height_map
             if ref is None:
-                self.ref = self.get_rectify_crop_avg_image()
+                if auto_ref:
+                    import time
+                    print('Remove objects; capturing reference in 3 seconds...')
+                    time.sleep(3)
+                    self.ref = self.capture_reference()
+                else:
+                    self.ref = self.get_rectify_crop_avg_image()
             else:
                 self.ref = ref
             self.ref_GRAY = cv2.cvtColor(self.ref, cv2.COLOR_BGR2GRAY)
@@ -82,7 +89,7 @@ class Sensor(Camera):
         vis_img = np.ones(
             (img_GRAY.shape[0], img_GRAY.shape[1], 3), dtype=np.uint8) - 1
         threshold = 4
-        showing_scale = 255 // max(diff_dark.max(), -diff_dark.min())
+        showing_scale = 255 / max(float(np.abs(diff_dark).max()), 1.0)
         vis_img[diff_dark > threshold,
                 2] = diff_dark[diff_dark > threshold] * showing_scale
         vis_img[diff_dark < -threshold, 1] = - \

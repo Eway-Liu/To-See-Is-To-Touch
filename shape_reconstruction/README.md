@@ -15,7 +15,7 @@
 | `visualization/` | Open3D 点云显示和 `sensor_obj/` 网格资源 |
 | `demos/` | 实时三维形状重建演示 |
 
-标定图片和 `.npy` 文件继续保存在原来的传感器目录，不需要重新标定。
+标定图片和 `.npy` 文件继续保存在原来的传感器目录。只有对应同一传感器、相机位置与光照设置的有效标定才能沿用。
 
 ## 启动命令
 
@@ -24,27 +24,26 @@
 python -m shape_reconstruction.calibration.camera_calibration
 python -m shape_reconstruction.calibration.sensor_calibration
 
-# 采集和检查
-python -m shape_reconstruction.data.data_preparation --auto_ref
-python -m shape_reconstruction.data.check_dataset --data_dir reconstruction_data/train --visualize
+# 采集：同一实物沿用同一个 object_id；接触组由脚本自动记录
+python -m shape_reconstruction.data.data_preparation --auto_ref --object_id steel_ball_8mm --output_dir reconstruction_data/raw
 
-# 快速 U-Net 训练，对应 GUIDE.md 的流程
-python -m shape_reconstruction.learning.train_reconstruction \
-    --train_dir reconstruction_data/train --val_dir reconstruction_data/val --save_dir models
+# 筛选配对数据并按接触组划分 train/val/test，不移动原始数据
+python -m shape_reconstruction.data.prepare_dataset --data_dir reconstruction_data/raw --output reconstruction_data/splits.json
 
-# 多模型训练与评估（unet / simple / resnet）
-python -m shape_reconstruction.learning.train_model --model unet --save_dir saved_models
-python -m shape_reconstruction.learning.test_model --mode evaluate \
-    --model_path saved_models/reconstruction_best.pth
+# Windows 4080 上训练：新残差注意力 U-Net，CUDA 自动混合精度
+python -m shape_reconstruction.learning.train_model --manifest reconstruction_data/splits.json --model attention_unet --base_features 32 --batch_size 8 --epochs 120 --save_dir saved_models/attention_unet
 
-# 传统方法三维演示（需要 Open3D 和传感器）
-python -m shape_reconstruction.demos.shape_reconstruction_demo
+# 以独立 test split 评估，并可对传统方法同帧比较（需采集 raw/reference 图）
+python -m shape_reconstruction.learning.evaluation --manifest reconstruction_data/splits.json --split test --model_path saved_models/attention_unet/reconstruction_best.pth --compare_traditional
+
+# 实时三维并排演示；需要传感器和 Open3D
+python -m shape_reconstruction.demos.shape_reconstruction_demo --mode compare --model_path saved_models/attention_unet/reconstruction_best.pth --auto_ref
 
 # 配置与导入回归检查，无需连接硬件
 python -m unittest discover -s tests -v
 ```
 
-两套训练入口保留各自的模型和检查点格式：`train_reconstruction` 输出 `models/best_model.pth` 的纯权重，配合 GUIDE.md 中生成的 `demo_reconstruction.py`；`train_model` 输出带 `model_type` 等信息的检查点，配合 `learning.test_model` / `SensorDL` 使用。两者不能直接混用。`train_model` 需要额外安装 `tensorboard`，三维演示需要额外安装 `open3d`。
+`train_reconstruction` 是旧入口兼容层，和 `train_model` 使用一致的新检查点格式。旧 U-Net 纯权重仍可由推理器读取。在线三维演示需要安装 Open3D；离线回放/导出不需要相机。传统算法输出是伪标签时，指标表示网络对传统结果的拟合程度，不代表物理精度。
 
 ## 配置与 Python 调用
 

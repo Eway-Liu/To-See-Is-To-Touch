@@ -1,200 +1,124 @@
-"""
-数据准备脚本 - 从摄像头实时采集训练数据
-使用传统方法生成的高度图作为伪标签
-"""
-import os
-import cv2
-from ..config import DEFAULT_CONFIG_PATH, load_config
-import numpy as np
-import time
+"""Collect stable touches with traditional pseudo-labels and replayable raw frames."""
 import argparse
-from glob import glob
-
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import time
+import uuid
+import cv2
+import numpy as np
+from ..config import DEFAULT_CONFIG_PATH, load_config
 from ..core.sensor import Sensor
+from .pairs import validate_pair
 
 
 def get_existing_count(save_dir):
-    """获取已有数据集的数量"""
-    diff_dir = os.path.join(save_dir, 'diff_images')
-    if not os.path.exists(diff_dir):
-        return 0
-    existing_files = glob(os.path.join(diff_dir, '*.npy'))
-    return len(existing_files)
+    return len(list((Path(save_dir)/'diff_images').glob('*.npy')))
 
 
-def collect_data_from_camera(sensor, save_dir='./reconstruction_data/train'):
-    """
-    从摄像头实时采集数据
-    按 'q' 键退出
-    """
-    diff_dir = os.path.join(save_dir, 'diff_images')
-    height_dir = os.path.join(save_dir, 'height_maps')
-    os.makedirs(diff_dir, exist_ok=True)
-    os.makedirs(height_dir, exist_ok=True)
+def next_sample_index(save_dir):
+    indices=[int(p.stem) for folder in ('diff_images','height_maps','raw_images','reference_images')
+             for p in (Path(save_dir)/folder).glob('*.npy') if p.stem.isdigit()]
+    return max(indices,default=-1)+1
 
-    # 获取已有数据数量，从下一个编号开始
-    start_count = get_existing_count(save_dir)
-    count = start_count
-    new_samples = 0
 
-    print(f"\n已有数据: {start_count} 个样本")
-    print(f"新数据将从编号 {start_count:06d} 开始保存")
-    print("\n=== 开始采集数据 ===")
-    print("操作说明：")
-    print("  - 用不同物体接触传感器表面")
-    print("  - 尝试不同的接触位置、角度和力度")
-    print("  - 按 'q' 键退出并保存")
-    print("  - 按 's' 键手动保存当前帧")
-    print("\n采集中...")
+def save_sample(root,index,diff,height,raw,reference,metadata):
+    validate_pair(diff,height)
+    stem=f'{index:06d}' if isinstance(index,int) else str(index)
+    if Path(stem).name!=stem or stem in ('','.','..') or any(c in stem for c in '/\\:'):
+        raise ValueError('Sample must be a safe filename stem')
+    if raw.shape!=diff.shape or reference.shape!=diff.shape or raw.dtype!=np.uint8 or reference.dtype!=np.uint8:
+        raise ValueError('Raw/reference must be matching uint8 grayscale arrays')
+    name=f'{stem}.npy';written=[]
+    try:
+        for folder,array in (('diff_images',diff),('height_maps',height),
+                             ('raw_images',raw),('reference_images',reference)):
+            path=Path(root)/folder/name;path.parent.mkdir(parents=True,exist_ok=True)
+            with path.open('xb') as stream:
+                written.append(path)
+                np.save(stream,array,allow_pickle=False)
+        row={'file':name,**metadata}
+        with (Path(root)/'samples.jsonl').open('a',encoding='utf-8') as stream:
+            stream.write(json.dumps(row,ensure_ascii=False)+'\n')
+            stream.flush();os.fsync(stream.fileno())
+    except Exception:
+        for path in written:path.unlink(missing_ok=True)
+        raise
+    return name
 
-    last_saved_height = None
 
-    while sensor.cap.isOpened():
-        # 获取图像
-        img = sensor.get_rectify_crop_image()
-        if img is None:
-            continue
-
-        img_GRAY = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # 计算差分图像
-        diff_raw = sensor.ref_GRAY.astype(np.float32) - img_GRAY.astype(np.float32)
-        diff = np.clip(diff_raw, 0, 255).astype(np.float32)
-
-        # 生成高度图（传统方法作为伪标签）
-        height_map = sensor.raw_image_2_height_map(img_GRAY)
-
-        # 检测接触
-        contact_threshold = 0.05  # mm
-        max_height = np.max(height_map)
-
-        # 可视化
-        vis_img = sensor.visualize_gel_deformation(img)
-        depth_map = sensor.height_map_2_depth_map(height_map)
-        display = np.hstack([img, vis_img, cv2.cvtColor(depth_map, cv2.COLOR_GRAY2BGR)])
-
-        # 显示状态信息
-        status_text = f"Total: {count} | New: {new_samples} | Height: {max_height:.3f}mm | Press 'q' to quit, 's' to save"
-        cv2.putText(display, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                   0.6, (0, 255, 0), 2)
-
-        cv2.imshow('Data Collection: Original | Deformation | Depth', display)
-
-        key = cv2.waitKey(1)
-
-        # 手动保存
-        if key == ord('s') and max_height > contact_threshold:
-            np.save(os.path.join(diff_dir, f'{count:06d}.npy'), diff)
-            np.save(os.path.join(height_dir, f'{count:06d}.npy'), height_map)
-            count += 1
-            new_samples += 1
-            print(f"\r手动保存: 总计 {count} | 新增 {new_samples} | 最大高度: {max_height:.3f}mm", end='')
-            last_saved_height = height_map.copy()
-
-        # 自动保存有效接触
-        elif max_height > contact_threshold:
-            # 避免保存相似的连续帧
-            is_different = True
-            if last_saved_height is not None:
-                height_diff = np.abs(height_map - last_saved_height).mean()
-                if height_diff < 0.01:  # 变化太小
-                    is_different = False
-
-            if is_different:
-                np.save(os.path.join(diff_dir, f'{count:06d}.npy'), diff)
-                np.save(os.path.join(height_dir, f'{count:06d}.npy'), height_map)
-                last_saved_height = height_map.copy()
-                count += 1
-                new_samples += 1
-                print(f"\r自动保存: 总计 {count} | 新增 {new_samples} | 最大高度: {max_height:.3f}mm", end='')
-
-        # 退出
-        if key == ord('q'):
-            print("\n\n用户退出采集")
-            break
-
-    cv2.destroyAllWindows()
-    print(f"\n\n{'='*60}")
-    print(f"数据采集完成！")
-    print(f"{'='*60}")
-    print(f"原有样本: {start_count}")
-    print(f"新增样本: {new_samples}")
-    print(f"总计样本: {count}")
-    print(f"数据保存在: {save_dir}")
-    return new_samples
+def collect_data_from_camera(sensor,save_dir='reconstruction_data/raw',max_samples=None,
+                             min_interval=.5,min_input_change=2.,min_height_change=.03,
+                             object_id='unknown',stability_threshold=1.5,background_interval=10.):
+    if max_samples is not None and max_samples<=0:raise ValueError('max_samples must be positive')
+    if min_interval<0 or stability_threshold<=0 or background_interval<=0:raise ValueError('Invalid thresholds')
+    root=Path(save_dir);root.mkdir(parents=True,exist_ok=True)
+    index=next_sample_index(root);new=0;session=str(uuid.uuid4())
+    touch_id=None;touching=False;released_frames=0;stable_frames=0
+    last_diff=last_height=previous=None
+    last_save=0.;last_background=0.
+    print('s: save stable frame; q: finish. Release the object completely between touches.')
+    try:
+        while sensor.cap.isOpened() and (max_samples is None or new<max_samples):
+            image=sensor.get_rectify_crop_image();gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
+            diff=sensor.ref_GRAY.astype(np.float32)-gray.astype(np.float32)
+            height=Sensor.raw_image_2_height_map(sensor,gray).astype(np.float32)
+            validate_pair(diff,height)
+            peak=float(height.max())
+            if peak>.05 and not touching:
+                touching=True;touch_id=f'{session}:{uuid.uuid4()}'
+                last_diff=last_height=None
+            if peak<.025:
+                released_frames+=1
+                if released_frames>=3:touching=False
+            else:released_frames=0
+            stable_frames=stable_frames+1 if previous is not None and np.mean(np.abs(diff-previous))<=stability_threshold else 0
+            previous=diff.copy()
+            stable=stable_frames>=3
+            preview=np.hstack([image,cv2.cvtColor(sensor.height_map_2_depth_map(height),cv2.COLOR_GRAY2BGR)])
+            cv2.putText(preview,f'New {new} | {object_id} | peak {peak:.3f}mm | stable {stable} | s:save q:quit',
+                        (10,24),cv2.FONT_HERSHEY_SIMPLEX,.5,(0,255,0),1)
+            cv2.imshow('Acquisition: input | traditional pseudo-label',preview)
+            key=cv2.waitKey(1)&255
+            if key==ord('q'):break
+            now=time.monotonic()
+            changed=last_diff is None or np.mean(np.abs(diff-last_diff))>=min_input_change
+            if last_height is not None:
+                mask=(height>.05)|(last_height>.05)
+                changed=changed or (mask.any() and np.mean(np.abs(height-last_height)[mask])>=min_height_change)
+            background=not touching and peak<=.025 and now-last_background>=background_interval
+            save=stable and now-last_save>=min_interval and (key==ord('s') or (touching and changed) or background)
+            if not save:continue
+            label_group=touch_id if touching else f'{session}:background'
+            metadata={'group':label_group,'session':session,'object_id':object_id,
+                      'time':datetime.now(timezone.utc).isoformat(),'label_source':'traditional_pseudolabel',
+                      'max_height_mm':peak,'is_background':not touching,'mm_per_pixel':float(sensor.pixel_per_mm),
+                      'lighting_threshold':sensor.lighting_threshold,'kernel_list':list(sensor.kernel_list)}
+            save_sample(root,index,diff,height,gray,sensor.ref_GRAY,metadata)
+            index+=1;new+=1;last_save=now
+            if not touching:last_background=now
+            last_diff,last_height=diff.copy(),height.copy()
+            print(f'Saved {index-1:06d}: {peak:.3f}mm; new={new}')
+    finally:cv2.destroyAllWindows()
+    return new
 
 
 def main():
-    parser = argparse.ArgumentParser(description='从摄像头采集形状重建训练数据')
-    parser.add_argument('--config', type=str, default=str(DEFAULT_CONFIG_PATH),
-                        help='传感器配置文件')
-    parser.add_argument('--output_dir', type=str, default='./reconstruction_data/train',
-                        help='输出数据目录')
-    parser.add_argument('--auto_ref', action='store_true',
-                        help='自动捕获参考图像（3秒倒计时）')
-
-    args = parser.parse_args()
-
-    print("\n" + "=" * 60)
-    print("形状重建数据采集工具")
-    print("=" * 60)
-
-    print("\n加载传感器配置...")
-    cfg = load_config(args.config)
-
-    print("\n初始化传感器...")
-
-    if args.auto_ref:
-        # 自动捕获参考图像
-        print("自动捕获模式：")
-        print("确保传感器表面无任何物体接触...")
-        temp_camera = Sensor.__bases__[0](cfg, calibrated=True)  # 初始化Camera部分
-
-        for i in range(3, 0, -1):
-            print(f"  {i}秒后自动捕获参考图像...")
-            time.sleep(1)
-
-        # 捕获参考图像
-        print("  正在捕获参考图像...")
-        img_add = np.zeros_like(temp_camera.get_rectify_crop_image(), float)
-        for _ in range(10):
-            img_add += temp_camera.get_rectify_crop_image()
-        ref = (img_add / 10).astype(np.uint8)
-
-        # 使用捕获的参考图像初始化传感器
-        sensor = Sensor(cfg, calibrated=True, ref=ref)
-        print("✓ 参考图像已自动捕获！")
-    else:
-        # 交互式捕获参考图像
-        print("提示：将显示摄像头画面，请按 'y' 确认参考图像（无接触状态），或按 'q' 退出")
-        print("重要：确保传感器表面无任何物体接触，画面稳定后按 'y'")
-        sensor = Sensor(cfg, calibrated=True)
-        print("✓ 参考图像已确认！")
-
-    print("\n准备采集数据...")
-    print("提示：")
-    print("  1. 使用多种物体（球形、圆柱、平面等）")
-    print("  2. 尝试不同的接触位置、角度和力度")
-    print("  3. 采集过程中保持光照稳定")
-    print("  4. 数据会自动在原有基础上累加")
-
-    count = collect_data_from_camera(sensor, args.output_dir)
-
-    print("\n" + "=" * 60)
-    print(f"本次新增 {count} 个样本")
-    print("=" * 60)
-    print(f"\n数据保存在: {args.output_dir}")
-    print("\n目录结构:")
-    print(f"  {args.output_dir}/")
-    print("    ├── diff_images/")
-    print("    └── height_maps/")
-    print("\n提示：")
-    print("  - 可以多次运行此脚本继续采集数据")
-    print("  - 建议至少采集 500-1000 个样本用于训练")
-    print("  - 采集完成后运行训练脚本：")
-    print("    python -m shape_reconstruction.learning.train_reconstruction")
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--config',default=str(DEFAULT_CONFIG_PATH))
+    p.add_argument('--output_dir',default='reconstruction_data/raw')
+    p.add_argument('--object_id',required=True,help='Actual object identity, e.g. ball_R4mm or key_A')
+    p.add_argument('--max_samples',type=int)
+    p.add_argument('--auto_ref',action='store_true')
+    p.add_argument('--stability_threshold',type=float,default=1.5)
+    p.add_argument('--min_interval',type=float,default=.5)
+    a=p.parse_args();sensor=Sensor(load_config(a.config),auto_ref=a.auto_ref)
+    try:
+        total=collect_data_from_camera(sensor,a.output_dir,a.max_samples,min_interval=a.min_interval,
+                                       object_id=a.object_id,stability_threshold=a.stability_threshold)
+        print(f'Collected {total} new pairs in {a.output_dir}')
+    finally:sensor.cap.release();cv2.destroyAllWindows()
 
 
-if __name__ == '__main__':
-    main()
-
+if __name__=='__main__':main()

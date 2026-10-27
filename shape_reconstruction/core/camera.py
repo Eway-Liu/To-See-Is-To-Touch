@@ -12,6 +12,9 @@ class Camera:
         raw_img_height = camera_setting['resolution'][1]
         fps = camera_setting['fps']
         self.cap = cv2.VideoCapture(camera_channel)
+        if not self.cap.isOpened():
+            self.cap.release()
+            raise RuntimeError(f'Cannot open camera {camera_channel}; check cable and camera_channel')
         if self.cap.isOpened():
             print('------Camera is open--------')
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, raw_img_width)
@@ -41,7 +44,15 @@ class Camera:
             self.width_end = int(center_position[1] + self.crop_img_width / 2)
 
     def get_raw_image(self):
-        return self.cap.read()[1]
+        ok, image = self.cap.read()
+        if not ok or image is None:
+            raise RuntimeError('Camera frame read failed')
+        return image
+
+    def capture_reference(self, frames=10):
+        """Average rectified frames using this camera handle only."""
+        return np.mean([self.get_rectify_crop_image().astype(np.float32)
+                        for _ in range(frames)], axis=0).astype(np.uint8)
 
     def rectify_image(self, img):
         img_rectify = img[self.row_index, self.col_index]

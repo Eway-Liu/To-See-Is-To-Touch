@@ -1,366 +1,219 @@
-"""
-训练脚本
-训练深度学习模型进行三维形状重建
-"""
-import os
-import time
+"""Train a dense height regressor; metrics use mm and checkpoint stores preprocessing."""
 import argparse
-import yaml
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+import hashlib
+import json
+import random
+import time
+from pathlib import Path
 import numpy as np
-from tqdm import tqdm
-
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
 from .dataset import ShapeReconstructionDataset
-from .model import ReconstructionNet, SimpleReconstructionNet, ResNetReconstructionNet
+from .model import build_model, count_parameters
+from ..data.pairs import manifest_root
 
 
-class EdgeLoss(nn.Module):
-    """边缘损失：保持边缘清晰"""
-    def __init__(self):
-        super(EdgeLoss, self).__init__()
-
-    def forward(self, pred, target):
-        # 计算梯度
-        pred_grad_x = pred[:, :, :, 1:] - pred[:, :, :, :-1]
-        pred_grad_y = pred[:, :, 1:, :] - pred[:, :, :-1, :]
-
-        target_grad_x = target[:, :, :, 1:] - target[:, :, :, :-1]
-        target_grad_y = target[:, :, 1:, :] - target[:, :, :-1, :]
-
-        # 梯度差的L1损失
-        loss_x = torch.abs(pred_grad_x - target_grad_x).mean()
-        loss_y = torch.abs(pred_grad_y - target_grad_y).mean()
-
-        return loss_x + loss_y
+def atomic_save(checkpoint, path):
+    temporary = path.with_suffix('.tmp')
+    try:
+        torch.save(checkpoint, temporary)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-class CombinedLoss(nn.Module):
-    """组合损失函数"""
-    def __init__(self, alpha=1.0, beta=0.1):
-        super(CombinedLoss, self).__init__()
-        self.mse_loss = nn.MSELoss()
-        self.l1_loss = nn.L1Loss()
-        self.edge_loss = EdgeLoss()
-        self.alpha = alpha  # MSE权重
-        self.beta = beta    # 边缘损失权重
-
-    def forward(self, pred, target):
-        mse = self.mse_loss(pred, target)
-        l1 = self.l1_loss(pred, target)
-        edge = self.edge_loss(pred, target)
-
-        total_loss = self.alpha * mse + l1 + self.beta * edge
-        return total_loss, {'mse': mse.item(), 'l1': l1.item(), 'edge': edge.item()}
-
-
-def train_epoch(model, train_loader, optimizer, criterion, device, epoch):
-    """训练一个epoch"""
-    model.train()
-    total_loss = 0.0
-    total_mse = 0.0
-    total_l1 = 0.0
-    total_edge = 0.0
-
-    pbar = tqdm(train_loader, desc=f'Epoch {epoch} [Train]')
-    for diff_img, height_map in pbar:
-        diff_img = diff_img.to(device)
-        height_map = height_map.to(device)
-
-        # 前向传播
-        optimizer.zero_grad()
-        pred_height = model(diff_img)
-
-        # 计算损失
-        loss, loss_dict = criterion(pred_height, height_map)
-
-        # 反向传播
-        loss.backward()
-        optimizer.step()
-
-        # 记录
-        total_loss += loss.item()
-        total_mse += loss_dict['mse']
-        total_l1 += loss_dict['l1']
-        total_edge += loss_dict['edge']
-
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'mse': f"{loss_dict['mse']:.4f}"
-        })
-
-    num_batches = len(train_loader)
-    return {
-        'loss': total_loss / num_batches,
-        'mse': total_mse / num_batches,
-        'l1': total_l1 / num_batches,
-        'edge': total_edge / num_batches
-    }
+def make_loaders(args):
+    if args.manifest:
+        root, document = manifest_root(args.manifest, args.data_dir)
+        scale = document.get('height_scale_mm', args.height_scale)
+        for left, right in (('train','val'), ('train','test'), ('val','test')):
+            if set(document['splits'][left]) & set(document['splits'][right]):
+                raise ValueError(f'Overlapping samples between {left} and {right}')
+            rows = {r['file']:r for r in document['samples']}
+            for key in ('group','input_sha256'):
+                a = {rows[n][key] for n in document['splits'][left] if rows[n].get(key)}
+                b = {rows[n][key] for n in document['splits'][right] if rows[n].get(key)}
+                if a & b:
+                    raise ValueError(f'Overlapping {key} between {left} and {right}')
+        train = ShapeReconstructionDataset('train', root, manifest=args.manifest,
+                                           height_scale=scale, augmentation=True, geometric=args.geometric,
+                                           input_mode=args.input_mode)
+        val = ShapeReconstructionDataset('val', root, manifest=args.manifest,
+                                         height_scale=scale, augmentation=False, input_mode=args.input_mode)
+        if not document['splits']['test']:
+            print('WARNING: no independent test split; validation metrics do not establish generalization.')
+        return train, val, scale
+    if not args.train_dir:
+        args.train_dir = str(Path(args.data_dir or './reconstruction_data') / 'train')
+        args.val_dir = str(Path(args.data_dir or './reconstruction_data') / 'val')
+    train = ShapeReconstructionDataset('train', args.train_dir, augmentation=True,
+                                       height_scale=args.height_scale, geometric=args.geometric,
+                                       input_mode=args.input_mode)
+    if not args.val_dir or Path(args.train_dir).resolve() == Path(args.val_dir).resolve():
+        raise ValueError('Provide an independent --val_dir or use --manifest')
+    val = ShapeReconstructionDataset('val', args.val_dir or args.train_dir, augmentation=False,
+                                     height_scale=args.height_scale, input_mode=args.input_mode)
+    return train, val, args.height_scale
 
 
-def validate(model, val_loader, criterion, device, epoch):
-    """验证"""
-    model.eval()
-    total_loss = 0.0
-    total_mse = 0.0
-    total_l1 = 0.0
-    total_edge = 0.0
-    total_mae = 0.0
-    total_rmse = 0.0
+def metrics(pred, target, scale):
+    error = (pred.float() - target.float()) * scale
+    return {'mae_mm': error.abs().mean().item(), 'rmse_mm': error.square().mean().sqrt().item()}
 
-    with torch.no_grad():
-        pbar = tqdm(val_loader, desc=f'Epoch {epoch} [Val]')
-        for diff_img, height_map in pbar:
-            diff_img = diff_img.to(device)
-            height_map = height_map.to(device)
 
-            # 前向传播
-            pred_height = model(diff_img)
+def loss_fn(pred, target, scale=10.0):
+    p, t = pred.float(), target.float()
+    # Emphasize loaded/contact pixels while preserving empty background evidence.
+    weight = 1.0 + 3.0 * (t > .05 / scale).float()
+    data_loss = (nn.functional.smooth_l1_loss(p, t, reduction='none', beta=.02) * weight).mean()
+    dx = nn.functional.l1_loss(p[..., 1:] - p[..., :-1], t[..., 1:] - t[..., :-1])
+    dy = nn.functional.l1_loss(p[..., 1:, :] - p[..., :-1, :], t[..., 1:, :] - t[..., :-1, :])
+    return data_loss + .15 * (dx + dy)
 
-            # 计算损失
-            loss, loss_dict = criterion(pred_height, height_map)
 
-            # 额外指标
-            mae = torch.abs(pred_height - height_map).mean()
-            rmse = torch.sqrt(((pred_height - height_map) ** 2).mean())
-
-            total_loss += loss.item()
-            total_mse += loss_dict['mse']
-            total_l1 += loss_dict['l1']
-            total_edge += loss_dict['edge']
-            total_mae += mae.item()
-            total_rmse += rmse.item()
-
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'rmse': f'{rmse.item():.4f}'
-            })
-
-    num_batches = len(val_loader)
-    return {
-        'loss': total_loss / num_batches,
-        'mse': total_mse / num_batches,
-        'l1': total_l1 / num_batches,
-        'edge': total_edge / num_batches,
-        'mae': total_mae / num_batches,
-        'rmse': total_rmse / num_batches
-    }
+def run_epoch(model, loader, optimizer, scaler, device, amp, train, scale=10.0):
+    model.train(train)
+    total, mae, rmse, count = 0.0, 0.0, 0.0, 0
+    context = torch.enable_grad if train else torch.inference_mode
+    with context():
+        for x, y in loader:
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            if train:
+                optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type=device.type, dtype=torch.float16,
+                                enabled=amp and device.type == 'cuda'):
+                pred = model(x)
+                loss = loss_fn(pred, y, scale)
+            if not torch.isfinite(loss):
+                raise RuntimeError('Non-finite loss; check data and learning rate')
+            if train:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            batch = x.shape[0]
+            m = metrics(pred.detach(), y, scale)
+            total += loss.item() * batch
+            mae += m['mae_mm'] * batch
+            rmse += m['rmse_mm'] ** 2 * batch
+            count += batch
+    if not count:
+        return None
+    return {'loss': total/count, 'mae_mm': mae/count, 'rmse_mm': (rmse/count) ** .5}
 
 
 def main():
-    parser = argparse.ArgumentParser(description='训练形状重建模型')
-    parser.add_argument('--data_dir', type=str, default='./reconstruction_data',
-                        help='数据目录')
-    parser.add_argument('--model', type=str, default='unet',
-                        choices=['unet', 'simple', 'resnet'],
-                        help='模型架构')
-    parser.add_argument('--batch_size', type=int, default=16,
-                        help='批次大小')
-    parser.add_argument('--epochs', type=int, default=50,
-                        help='训练轮数')
-    parser.add_argument('--lr', type=float, default=1e-3,
-                        help='学习率')
-    parser.add_argument('--save_dir', type=str, default='./saved_models',
-                        help='模型保存目录')
-    parser.add_argument('--log_dir', type=str, default='./logs',
-                        help='日志目录')
-    parser.add_argument('--resume', type=str, default=None,
-                        help='恢复训练的检查点路径')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
-                        help='设备')
-
-    args = parser.parse_args()
-
-    print("\n" + "=" * 60)
-    print("训练形状重建模型")
-    print("=" * 60)
-    print(f"\n配置:")
-    for key, value in vars(args).items():
-        print(f"  {key}: {value}")
-
-    # 设置设备
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--data_dir', help='Data root; overrides manifest path after copying to another computer')
+    p.add_argument('--manifest')
+    p.add_argument('--train_dir')
+    p.add_argument('--val_dir')
+    p.add_argument('--model', choices=['attention_unet','unet','simple','resnet'], default='attention_unet')
+    p.add_argument('--base_features', type=int, default=32)
+    p.add_argument('--batch_size', type=int, default=8)
+    p.add_argument('--epochs', type=int, default=120)
+    p.add_argument('--lr', type=float, default=3e-4)
+    p.add_argument('--height_scale', type=float, default=10.0)
+    p.add_argument('--save_dir', default='./saved_models')
+    p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    p.add_argument('--workers', type=int, default=4)
+    p.add_argument('--patience', type=int, default=18)
+    p.add_argument('--seed', type=int, default=42)
+    p.add_argument('--resume')
+    p.add_argument('--no_amp', action='store_true')
+    p.add_argument('--geometric', action='store_true', help='Enable flips/180-degree turns only after validation')
+    p.add_argument('--input_mode', choices=['positive_diff','signed_diff'], default='positive_diff')
+    args = p.parse_args()
+    if args.epochs <= 0 or args.batch_size <= 0 or args.base_features < 4 or args.workers < 0 or args.patience < 1:
+        raise ValueError('Invalid training parameters')
+    if not np.isfinite([args.height_scale,args.lr]).all() or args.height_scale<=0 or args.lr<=0:
+        raise ValueError('Height scale and learning rate must be finite and positive')
+    out = Path(args.save_dir).resolve()
+    history_path = out / 'history.jsonl'
+    if (history_path.exists() or (out/'latest.pth').exists()) and not args.resume:
+        raise ValueError('Save directory already has training results; use a new directory or --resume')
+    if args.resume and (Path(args.resume).resolve().parent!=out or not (out/'reconstruction_best.pth').is_file()):
+        raise ValueError('Resume in the original --save_dir, keeping reconstruction_best.pth alongside latest.pth')
+    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.benchmark = True
     device = torch.device(args.device)
-    print(f"\n使用设备: {device}")
-    if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-
-    # 创建保存目录
-    os.makedirs(args.save_dir, exist_ok=True)
-    os.makedirs(args.log_dir, exist_ok=True)
-
-    # 创建数据集
-    print("\n加载数据集...")
-    train_dataset = ShapeReconstructionDataset(
-        mode='train',
-        data_dir=args.data_dir,
-        augmentation=True
-    )
-    val_dataset = ShapeReconstructionDataset(
-        mode='val',
-        data_dir=args.data_dir,
-        augmentation=False
-    )
-
-    print(f"训练集: {len(train_dataset)} 个样本")
-    print(f"验证集: {len(val_dataset)} 个样本")
-
-    if len(train_dataset) == 0:
-        print("\n错误：训练集为空！")
-        print("请先运行数据准备脚本：")
-        print("  python -m shape_reconstruction.data.data_preparation --auto_ref")
-        return
-
-    # 创建数据加载器
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    # 创建模型
-    print("\n创建模型...")
-    if args.model == 'unet':
-        model = ReconstructionNet(base_features=32)
-    elif args.model == 'simple':
-        model = SimpleReconstructionNet()
-    elif args.model == 'resnet':
-        model = ResNetReconstructionNet()
-    else:
-        raise ValueError(f"未知模型: {args.model}")
-
-    model = model.to(device)
-    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"模型: {args.model}")
-    print(f"参数量: {num_params:,}")
-
-    # 损失函数
-    criterion = CombinedLoss(alpha=1.0, beta=0.1)
-
-    # 优化器
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-
-    # 学习率调度器
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
-    )
-
-    # TensorBoard
-    writer = SummaryWriter(args.log_dir)
-
-    # 恢复训练
-    start_epoch = 0
-    best_val_loss = float('inf')
-
+    if device.type == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError('CUDA requested but unavailable; install a CUDA-enabled PyTorch build.')
+    train_ds, val_ds, scale = make_loaders(args)
+    if train_ds.shape!=val_ds.shape:
+        raise ValueError('Training and validation image dimensions differ')
+    fingerprint = None
+    if args.manifest:
+        _, document = manifest_root(args.manifest, args.data_dir)
+        document.pop('data_dir',None)
+        fingerprint = hashlib.sha256(json.dumps(document,sort_keys=True).encode()).hexdigest()
+    kwargs = {'num_workers': args.workers, 'pin_memory': device.type == 'cuda'}
+    if args.workers:
+        kwargs['persistent_workers'] = True
+        kwargs['prefetch_factor'] = 2
+    train_loader = DataLoader(train_ds, args.batch_size, shuffle=True, **kwargs)
+    val_loader = DataLoader(val_ds, args.batch_size, shuffle=False, **kwargs) if val_ds else []
+    model = build_model(args.model, args.base_features).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=.5)
+    scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda' and not args.no_amp)
+    start, best, stale = 0, float('inf'), 0
     if args.resume:
-        if os.path.isfile(args.resume):
-            print(f"\n从 {args.resume} 恢复训练...")
-            checkpoint = torch.load(args.resume, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            start_epoch = checkpoint['epoch'] + 1
-            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            print(f"从 epoch {start_epoch} 继续训练")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=True)
+        if ckpt.get('model_type') != args.model or ckpt.get('base_features') != args.base_features:
+            raise ValueError('Resume checkpoint architecture does not match requested model')
+        if ckpt.get('height_scale', 10.0) != scale or ckpt.get('input_mode', 'positive_diff') != args.input_mode:
+            raise ValueError('Resume checkpoint normalization does not match dataset')
+        if ckpt.get('manifest_sha256') != fingerprint:
+            raise ValueError('Resume manifest differs from the original training manifest')
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        start, best, stale = ckpt['epoch'] + 1, ckpt.get('best_val_loss', best), ckpt.get('stale_epochs', 0)
+        if 'scheduler_state_dict' in ckpt: scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        if 'scaler_state_dict' in ckpt: scaler.load_state_dict(ckpt['scaler_state_dict'])
+    out.mkdir(parents=True, exist_ok=True)
+    run = {'device': str(device), 'model': args.model, 'base_features': args.base_features,
+           'parameters': count_parameters(model), 'train_samples': len(train_ds),
+           'val_samples': len(val_ds) if val_ds else 0, 'height_scale_mm': scale,
+           'label_source': getattr(train_ds, 'label_source', 'legacy'), 'input_mode': args.input_mode,
+           'manifest_sha256':fingerprint, 'arguments':vars(args)}
+    (out/'run.json').write_text(json.dumps(run, indent=2), encoding='utf-8')
+    print(json.dumps(run, indent=2))
+    for epoch in range(start, args.epochs):
+        t0 = time.perf_counter()
+        tr = run_epoch(model, train_loader, optimizer, scaler, device, not args.no_amp, True, scale)
+        va = run_epoch(model, val_loader, optimizer, scaler, device, not args.no_amp, False, scale) if len(val_ds) else tr
+        scheduler.step(va['loss'])
+        improved = va['loss'] < best
+        if improved:
+            best, stale = va['loss'], 0
         else:
-            print(f"\n警告：未找到检查点 {args.resume}")
-
-    # 训练循环
-    print("\n" + "=" * 60)
-    print("开始训练")
-    print("=" * 60)
-
-    for epoch in range(start_epoch, args.epochs):
-        print(f"\nEpoch {epoch + 1}/{args.epochs}")
-        print("-" * 60)
-
-        # 训练
-        train_metrics = train_epoch(model, train_loader, optimizer, criterion, device, epoch + 1)
-
-        print(f"\n[训练] Loss: {train_metrics['loss']:.4f} | "
-              f"MSE: {train_metrics['mse']:.4f} | "
-              f"L1: {train_metrics['l1']:.4f} | "
-              f"Edge: {train_metrics['edge']:.4f}")
-
-        # 验证
-        if len(val_dataset) > 0:
-            val_metrics = validate(model, val_loader, criterion, device, epoch + 1)
-
-            print(f"[验证] Loss: {val_metrics['loss']:.4f} | "
-                  f"RMSE: {val_metrics['rmse']:.4f} | "
-                  f"MAE: {val_metrics['mae']:.4f}")
-
-            # 学习率调度
-            scheduler.step(val_metrics['loss'])
-
-            # 记录到TensorBoard
-            writer.add_scalar('Loss/train', train_metrics['loss'], epoch)
-            writer.add_scalar('Loss/val', val_metrics['loss'], epoch)
-            writer.add_scalar('Metrics/RMSE', val_metrics['rmse'], epoch)
-            writer.add_scalar('Metrics/MAE', val_metrics['mae'], epoch)
-            writer.add_scalar('LR', optimizer.param_groups[0]['lr'], epoch)
-
-            # 保存最佳模型
-            if val_metrics['loss'] < best_val_loss:
-                best_val_loss = val_metrics['loss']
-                best_model_path = os.path.join(args.save_dir, 'reconstruction_best.pth')
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': val_metrics['loss'],
-                    'rmse': val_metrics['rmse'],
-                    'mae': val_metrics['mae'],
-                    'best_val_loss': best_val_loss,
-                    'model_type': args.model
-                }, best_model_path)
-                print(f"✓ 保存最佳模型到 {best_model_path}")
-        else:
-            # 没有验证集，记录训练指标
-            writer.add_scalar('Loss/train', train_metrics['loss'], epoch)
-            writer.add_scalar('LR', optimizer.param_groups[0]['lr'], epoch)
-
-        # 定期保存检查点
-        if (epoch + 1) % 10 == 0:
-            checkpoint_path = os.path.join(args.save_dir, f'reconstruction_epoch_{epoch + 1}.pth')
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'best_val_loss': best_val_loss,
-                'model_type': args.model
-            }, checkpoint_path)
-            print(f"✓ 保存检查点到 {checkpoint_path}")
-
-    # 训练完成
-    print("\n" + "=" * 60)
-    print("训练完成！")
-    print("=" * 60)
-
-    # 保存最终模型
-    final_model_path = os.path.join(args.save_dir, 'reconstruction_final.pth')
-    torch.save({
-        'epoch': args.epochs - 1,
-        'model_state_dict': model.state_dict(),
-        'model_type': args.model
-    }, final_model_path)
-    print(f"\n最终模型保存到: {final_model_path}")
-    print(f"最佳模型保存到: {os.path.join(args.save_dir, 'reconstruction_best.pth')}")
-    print(f"TensorBoard日志: {args.log_dir}")
-    print("\n查看训练日志:")
-    print(f"  tensorboard --logdir {args.log_dir}")
-
-    writer.close()
+            stale += 1
+        ckpt = {'epoch': epoch, 'model_type': args.model, 'base_features': args.base_features,
+                'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(), 'scaler_state_dict': scaler.state_dict(),
+                'best_val_loss': best, 'stale_epochs': stale, 'height_scale': scale,
+                'input_mode': args.input_mode, 'label_source': run['label_source'],
+                'manifest_sha256':fingerprint}
+        atomic_save(ckpt, out/'latest.pth')
+        if improved:
+            atomic_save(ckpt, out/'reconstruction_best.pth')
+        print(f"{epoch+1:03d}/{args.epochs} {time.perf_counter()-t0:.1f}s "
+              f"train loss={tr['loss']:.5f} MAE={tr['mae_mm']:.4f}mm "
+              f"val loss={va['loss']:.5f} MAE={va['mae_mm']:.4f}mm RMSE={va['rmse_mm']:.4f}mm "
+              f"lr={optimizer.param_groups[0]['lr']:.2g}" + (' best' if improved else ''))
+        with history_path.open('a', encoding='utf-8') as f:
+            f.write(json.dumps({'epoch': epoch+1, 'train': tr, 'val': va, 'seconds': time.perf_counter()-t0}) + '\n')
+        if stale >= args.patience:
+            print(f'Early stop: no validation improvement for {stale} epochs')
+            break
+    print(f'Best checkpoint: {out / "reconstruction_best.pth"}')
+    if 'pseudolabel' in str(run['label_source']):
+        print('Metrics describe agreement with traditional pseudo-labels, not physical accuracy.')
 
 
 if __name__ == '__main__':
