@@ -3,12 +3,15 @@ import argparse
 import hashlib
 import json
 import random
+import sys
 import time
+from datetime import timedelta
 from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 from .dataset import ShapeReconstructionDataset
 from .model import build_model, count_parameters
 from ..data.pairs import manifest_root
@@ -72,12 +75,24 @@ def loss_fn(pred, target, scale=10.0):
     return data_loss + .15 * (dx + dy)
 
 
-def run_epoch(model, loader, optimizer, scaler, device, amp, train, scale=10.0):
+def run_epoch(model, loader, optimizer, scaler, device, amp, train, scale=10.0,
+              *, epoch=None, epochs=None, progress='off'):
     model.train(train)
     total, mae, rmse, count = 0.0, 0.0, 0.0, 0
+    phase = 'Train' if train else 'Valid'
+    description = f'{phase} [{epoch}/{epochs}]' if epoch is not None else phase
+    show_bar = progress == 'on' or (progress == 'auto' and sys.stdout.isatty())
+    show_text = progress == 'auto' and not show_bar
+    batch_count = len(loader)
+    started = last_report = time.perf_counter()
+    if show_text:
+        print(f'  {description} 0/{batch_count} batches | loading first batch / warm-up...', flush=True)
     context = torch.enable_grad if train else torch.inference_mode
-    with context():
-        for x, y in loader:
+    with context(), tqdm(loader, desc=description, unit='batch', file=sys.stdout,
+                         dynamic_ncols=True, ascii=True, leave=False,
+                         bar_format='{desc} {n_fmt}/{total_fmt}{postfix} |{bar}| ETA {remaining} {rate_fmt}',
+                         mininterval=.5, miniters=1, disable=not show_bar) as batches:
+        for step, (x, y) in enumerate(batches, 1):
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             if train:
                 optimizer.zero_grad(set_to_none=True)
@@ -99,6 +114,21 @@ def run_epoch(model, loader, optimizer, scaler, device, amp, train, scale=10.0):
             mae += m['mae_mm'] * batch
             rmse += m['rmse_mm'] ** 2 * batch
             count += batch
+            if show_bar:
+                values = {'loss': f'{total/count:.5f}', 'MAE': f'{mae/count:.4f}mm'}
+                batches.set_postfix(values, refresh=False)
+            elif show_text:
+                now = time.perf_counter()
+                if step == 1 or step == batch_count or now - last_report >= 10:
+                    elapsed = now - started
+                    eta = elapsed / step * (batch_count - step)
+                    print(f'  {description} {step}/{batch_count} batches '
+                          f'({step/batch_count:.0%}) | loss={total/count:.5f} '
+                          f'MAE={mae/count:.4f}mm | '
+                          f'{step/max(elapsed, 1e-9):.2f} batch/s | '
+                          f'elapsed={timedelta(seconds=int(elapsed))} '
+                          f'ETA={timedelta(seconds=int(eta))}', flush=True)
+                    last_report = now
     if not count:
         return None
     return {'loss': total/count, 'mae_mm': mae/count, 'rmse_mm': (rmse/count) ** .5}
@@ -125,6 +155,8 @@ def main():
     p.add_argument('--no_amp', action='store_true')
     p.add_argument('--geometric', action='store_true', help='Enable flips/180-degree turns only after validation')
     p.add_argument('--input_mode', choices=['positive_diff','signed_diff'], default='positive_diff')
+    p.add_argument('--progress', choices=['auto', 'on', 'off'], default='auto',
+                   help='auto: terminal bars or periodic plain logs; on: force bars; off: epoch summaries only')
     args = p.parse_args()
     if args.epochs <= 0 or args.batch_size <= 0 or args.base_features < 4 or args.workers < 0 or args.patience < 1:
         raise ValueError('Invalid training parameters')
@@ -143,6 +175,7 @@ def main():
     device = torch.device(args.device)
     if device.type == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA requested but unavailable; install a CUDA-enabled PyTorch build.')
+    print('Preparing training and validation data...', flush=True)
     train_ds, val_ds, scale = make_loaders(args)
     if train_ds.shape!=val_ds.shape:
         raise ValueError('Training and validation image dimensions differ')
@@ -182,11 +215,27 @@ def main():
            'label_source': getattr(train_ds, 'label_source', 'legacy'), 'input_mode': args.input_mode,
            'manifest_sha256':fingerprint, 'arguments':vars(args)}
     (out/'run.json').write_text(json.dumps(run, indent=2), encoding='utf-8')
-    print(json.dumps(run, indent=2))
+    device_name = torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'
+    print('\n' + '=' * 72, flush=True)
+    print(f'Shape reconstruction training | {args.model} | {run["parameters"]:,} parameters', flush=True)
+    print(f'Device: {device} ({device_name}) | AMP: {"on" if scaler.is_enabled() else "off"}', flush=True)
+    print(f'Data: {len(train_ds):,} train / {len(val_ds):,} validation | '
+          f'{train_ds.shape[0]}x{train_ds.shape[1]} | batch size {args.batch_size}', flush=True)
+    print(f'Epochs completed: {start}/{args.epochs} | initial lr: {optimizer.param_groups[0]["lr"]:.2g}', flush=True)
+    if args.resume:
+        print(f'Resumed checkpoint: {Path(args.resume).resolve()}', flush=True)
+    print(f'Checkpoints and logs: {out}', flush=True)
+    print('=' * 72, flush=True)
+    run_started = time.perf_counter()
     for epoch in range(start, args.epochs):
         t0 = time.perf_counter()
-        tr = run_epoch(model, train_loader, optimizer, scaler, device, not args.no_amp, True, scale)
-        va = run_epoch(model, val_loader, optimizer, scaler, device, not args.no_amp, False, scale) if len(val_ds) else tr
+        best_text = f'{best:.5f}' if np.isfinite(best) else '--'
+        print(f'\nEpoch {epoch+1}/{args.epochs} | lr={optimizer.param_groups[0]["lr"]:.2g} | '
+              f'best val loss={best_text} | early stop={stale}/{args.patience}', flush=True)
+        tr = run_epoch(model, train_loader, optimizer, scaler, device, not args.no_amp, True, scale,
+                       epoch=epoch+1, epochs=args.epochs, progress=args.progress)
+        va = run_epoch(model, val_loader, optimizer, scaler, device, not args.no_amp, False, scale,
+                       epoch=epoch+1, epochs=args.epochs, progress=args.progress) if len(val_ds) else tr
         scheduler.step(va['loss'])
         improved = va['loss'] < best
         if improved:
@@ -202,16 +251,19 @@ def main():
         atomic_save(ckpt, out/'latest.pth')
         if improved:
             atomic_save(ckpt, out/'reconstruction_best.pth')
-        print(f"{epoch+1:03d}/{args.epochs} {time.perf_counter()-t0:.1f}s "
-              f"train loss={tr['loss']:.5f} MAE={tr['mae_mm']:.4f}mm "
-              f"val loss={va['loss']:.5f} MAE={va['mae_mm']:.4f}mm RMSE={va['rmse_mm']:.4f}mm "
-              f"lr={optimizer.param_groups[0]['lr']:.2g}" + (' best' if improved else ''))
+        print(f"  Train: loss={tr['loss']:.5f} | MAE={tr['mae_mm']:.4f}mm", flush=True)
+        print(f"  Valid: loss={va['loss']:.5f} | MAE={va['mae_mm']:.4f}mm | "
+              f"RMSE={va['rmse_mm']:.4f}mm", flush=True)
+        print(f'  Best val loss={best:.5f}' + (' [NEW BEST - saved]' if improved else '') +
+              f' | early stop={stale}/{args.patience}', flush=True)
+        print(f'  Time: epoch={timedelta(seconds=int(time.perf_counter()-t0))} | '
+              f'total time={timedelta(seconds=int(time.perf_counter()-run_started))}', flush=True)
         with history_path.open('a', encoding='utf-8') as f:
             f.write(json.dumps({'epoch': epoch+1, 'train': tr, 'val': va, 'seconds': time.perf_counter()-t0}) + '\n')
         if stale >= args.patience:
-            print(f'Early stop: no validation improvement for {stale} epochs')
+            print(f'Early stop: no validation loss improvement for {stale} epochs', flush=True)
             break
-    print(f'Best checkpoint: {out / "reconstruction_best.pth"}')
+    print(f'\nBest checkpoint: {out / "reconstruction_best.pth"}', flush=True)
     if 'pseudolabel' in str(run['label_source']):
         print('Metrics describe agreement with traditional pseudo-labels, not physical accuracy.')
 

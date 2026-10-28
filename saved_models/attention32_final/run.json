@@ -1,0 +1,36 @@
+{
+  "device": "cuda",
+  "model": "attention_unet",
+  "base_features": 32,
+  "parameters": 7700093,
+  "train_samples": 2100,
+  "val_samples": 450,
+  "height_scale_mm": 10.0,
+  "label_source": [
+    "synthetic_traditional_pseudolabel"
+  ],
+  "input_mode": "positive_diff",
+  "manifest_sha256": "83831ca94aadda846693ac169ebcafecc2066e912a28e0fcde492b9915d796ba",
+  "arguments": {
+    "data_dir": "reconstruction_data/raw",
+    "manifest": "reconstruction_data/splits.json",
+    "train_dir": null,
+    "val_dir": null,
+    "model": "attention_unet",
+    "base_features": 32,
+    "batch_size": 8,
+    "epochs": 120,
+    "lr": 0.0003,
+    "height_scale": 10.0,
+    "save_dir": "saved_models/attention32_final",
+    "device": "cuda",
+    "workers": 4,
+    "patience": 18,
+    "seed": 42,
+    "resume": null,
+    "no_amp": false,
+    "geometric": false,
+    "input_mode": "positive_diff",
+    "progress": "on"
+  }
+}

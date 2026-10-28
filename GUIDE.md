@@ -64,7 +64,11 @@ python -m shape_reconstruction.learning.train_model `
   --epochs 160 --workers 4 --save_dir saved_models/attention48
 ```
 
-根据验证集 MAE 选择模型，最后只在独立 test 划分上评估一次。继续训练必须使用原 `--save_dir`、原检查点和原 manifest：
+训练时会显示当前 epoch、训练与验证批次进度、累计平均 loss 和 MAE、速度及预计剩余时间。交互终端显示动态进度条；重定向日志时自动改为定期输出普通文本。每轮结束汇总验证 RMSE、最佳验证 loss、早停计数和耗时，保存新的最佳模型时标记 `NEW BEST`。启动时显示设备、AMP、数据规模和保存位置。
+
+默认 `--progress auto`；需要强制显示进度条时添加 `--progress on`，仅保留每轮汇总时添加 `--progress off`。完整运行参数和指标仍保存在 `run.json` 与 `history.jsonl` 中。
+
+训练脚本按验证集 loss 保存最佳检查点；比较候选模型时同时检查验证集 MAE 和重建图，最后只在独立 test 划分上评估一次。继续训练必须使用原 `--save_dir`、原检查点和原 manifest：
 
 ```powershell
 python -m shape_reconstruction.learning.train_model `
@@ -104,9 +108,7 @@ python -m shape_reconstruction.learning.ball_reference \
 实时摄像头对比：
 
 ```bash
-python -m shape_reconstruction.demos.shape_reconstruction_demo \
-  --mode compare --model_path saved_models/attention48/reconstruction_best.pth \
-  --auto_ref --output demo_results
+& "C:\Users\Eway\.conda\envs\general\python.exe" -m shape_reconstruction.demos.shape_reconstruction_demo --mode compare --model_path saved_models/attention32_final/reconstruction_best.pth --device cuda --output demo_results
 ```
 
 无相机时回放伪标签输出目录并循环：
