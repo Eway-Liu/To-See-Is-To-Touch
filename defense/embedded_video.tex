@@ -1,0 +1,52 @@
+% Native H.264 RichMedia, without a Flash player.
+% Uses the installed pdfbase driver API and the PDF RichMedia object model.
+\ExplSyntaxOn
+\box_new:N \l_defense_poster_box
+\NewDocumentCommand \embeddefensevideo {mm} {
+  \group_begin:
+  \leavevmode
+  \pbs_pdfobj:nnn {} {fstream}
+    {{/Type/EmbeddedFile/Subtype/video\c_hash_str 2Fmp4}{#2}}
+  \pbs_pdfobj:nnn {} {dict} {
+    /Type/Filespec/F~(demo.mp4)/UF~(demo.mp4)
+    /EF~<</F~\pbs_pdflastobj:>>
+  }
+  \tl_set:Nx \l_defense_asset_tl {\pbs_pdflastobj:}
+  \pbs_pdfobj:nnn {} {dict} {
+    /Type/RichMediaInstance/Subtype/Video/Asset~\l_defense_asset_tl
+  }
+  \pbs_pdfobj:nnn {} {dict} {
+    /Type/RichMediaConfiguration/Subtype/Video/Instances~[\pbs_pdflastobj:]
+  }
+  \tl_set:Nx \l_defense_config_tl {\pbs_pdflastobj:}
+  \pbs_pdfobj:nnn {} {dict} {
+    /Type/RichMediaContent
+    /Assets~<</Names~[(demo.mp4)~\l_defense_asset_tl]>>
+    /Configurations~[\l_defense_config_tl]
+  }
+  \tl_set:Nx \l_defense_content_tl {\pbs_pdflastobj:}
+  \pbs_pdfobj:nnn {} {dict} {
+    /Type/RichMediaSettings
+    /Activation~<</Condition/XA/Configuration~\l_defense_config_tl
+      /Presentation~<</Style/Embedded/Toolbar~true/PassContextClick~true>>>>
+    /Deactivation~<</Condition/PI>>
+  }
+  \tl_set:Nx \l_defense_settings_tl {\pbs_pdflastobj:}
+  \hbox_set:Nn \l_defense_poster_box {#1}
+  \pbs_pdfxform:nnnnn {1}{1}{}{}{\l_defense_poster_box}
+  \pbs_pdfannot:nnnn
+    {\box_wd:N\l_defense_poster_box}
+    {\box_ht:N\l_defense_poster_box}
+    {\box_dp:N\l_defense_poster_box} {
+      /Subtype/RichMedia/F~4/BS~<</W~0>>
+      /Contents~(Click~to~play~the~embedded~demonstration~video)
+      /NM~(defense-demo-video)
+      /AP~<</N~\pbs_pdflastxform:>>
+      /RichMediaContent~\l_defense_content_tl
+      /RichMediaSettings~\l_defense_settings_tl
+    }
+  \box_use:N \l_defense_poster_box
+  \group_end:
+}
+\pbs_pdfcatalog:n {/Extensions~<</ADBE~<</BaseVersion/1.7/ExtensionLevel~3>>>>}
+\ExplSyntaxOff
